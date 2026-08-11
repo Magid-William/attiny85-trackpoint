@@ -1,0 +1,51 @@
+name: Build ATtiny85 Firmware
+on: [push, pull_request, workflow_dispatch]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - project: arduino-isp
+            env: nano
+          - project: arduino-isp
+            env: leonardo
+          - project: attiny85-blink
+            env: program_via_ArduinoISP
+          - project: attiny85-serial-test
+            env: program_via_ArduinoISP
+          - project: attiny85-trackpoint-i2c-slave
+            env: program_via_ArduinoISP
+          - project: attiny85-trackpoint-oled
+            env: program_via_ArduinoISP
+          - project: attiny85-trackpoint-serial
+            env: program_via_ArduinoISP
+          - project: attiny85-trackpoint-synth
+            env: program_via_ArduinoISP
+          - project: leonardo-serial-reader
+            env: leonardo
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install PlatformIO Core
+        run: pip install platformio
+
+      - name: Compile (${{ matrix.project }} / ${{ matrix.env }})
+        run: pio run -d ${{ matrix.project }} -e ${{ matrix.env }}
+
+      - name: Upload binaries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.project }}-${{ matrix.env }}
+          path: ${{ matrix.project }}/.pio/build/${{ matrix.env }}/
+          if-no-files-found: ignore
