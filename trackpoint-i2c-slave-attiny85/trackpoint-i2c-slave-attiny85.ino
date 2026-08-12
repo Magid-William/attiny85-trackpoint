@@ -3,11 +3,13 @@
 
 #include <Wire.h>
 #include <PS2Trackpoint.h>
+#include <PowerCurve.h>
 #include <avr/power.h>
 
 #define I2C_ADDR     0x42
 #define BURST_ADDR   0x12
 #define DEBUG_ADDR   0x03
+#define SPEED_REG    PowerCurve::REG_SENS
 
 /*
   ATtiny85 (tinyX5 core) pin map:
@@ -22,6 +24,7 @@
 #define PS2_DAT      4
 
 PS2Trackpoint ps2(PS2_CLK, PS2_DAT);
+PowerCurve curve;
 
 static volatile uint8_t cur_addr;
 static volatile int8_t  burst_x = 0;
@@ -48,8 +51,22 @@ void requestEvent() {
 }
 
 void receiveEvent(int len) {
-    if (len > 0) {
-        cur_addr = Wire.read();
+    if (len <= 0) {
+        return;
+    }
+    cur_addr = Wire.read();
+    uint8_t b1 = 0, b2 = 0;
+    if (len > 1) b1 = Wire.read();
+    if (len > 2) b2 = Wire.read();
+
+    /* Exp60 port: ZMK driver writes speed/curve params at init + every
+     * link-restore. Store them and let loop() rebuild the LUT. */
+    if (cur_addr == SPEED_REG) {
+        curve.setSens(b1);
+    } else if (cur_addr == PowerCurve::REG_RATE
+            || cur_addr == PowerCurve::REG_EXP
+            || cur_addr == PowerCurve::REG_START) {
+        curve.setParam(cur_addr, (uint16_t)b1 | ((uint16_t)b2 << 8));
     }
 }
 
@@ -64,6 +81,7 @@ void setup() {
 
     ps2.begin();
     ps2.setReadTimeout(10000); /* Exp43: bound PS/2 idle wait; Exp58: 2000 (~1.5ms) timed out between packets — 10000 (~7.5ms) covers the inter-packet gap */
+    curve.begin();
 
     last_good_ms = millis();
 }
@@ -74,10 +92,14 @@ void loop() {
 
     /* readPacket syncs itself to packet gaps — no fixed interval needed */
     if (ps2.readPacket(x, y, buttons)) {
-        burst_x = x;
-        burst_y = y;
+        int8_t cx, cy;
+        curve.apply(x, y, cx, cy);
+        burst_x = cx;
+        burst_y = cy;
         last_good_ms = millis();
     }
+
+    curve.update(); /* rebuild LUT if a param landed since the last loop (no-op otherwise) */
 
     /* stop feeding the driver stale motion after 100ms without a packet */
     if ((burst_x || burst_y) && (millis() - last_good_ms > 100)) {
