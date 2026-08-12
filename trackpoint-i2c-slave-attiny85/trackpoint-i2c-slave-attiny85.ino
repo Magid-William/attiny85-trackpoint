@@ -30,30 +30,34 @@ static volatile uint8_t cur_addr;
 static volatile int8_t  burst_x = 0;
 static volatile int8_t  burst_y = 0;
 static unsigned long last_good_ms = 0;
+static volatile unsigned long last_busy_ms = 0; /* Exp62: USI idle self-heal */
 
 void requestEvent() {
-    if (cur_addr == BURST_ADDR) {
-        /* Exp43 fix: destructive read (PMW3610 burst semantics) — serve the
-         * sample once, then zero it. Prevents the 10ms-poll driver from
-         * accumulating the same sample 2-3x and from re-serving stale data. */
-        uint8_t buf[2] = { (uint8_t)burst_x, (uint8_t)burst_y };
-        burst_x = 0;
-        burst_y = 0;
-        Wire.write(buf, 2);
-    } else if (cur_addr == DEBUG_ADDR) {
-        /* Exp43 debug: [status, xraw, yraw, timeouts_lo, timeouts_hi] */
+    /* Exp62 fix: serve burst unconditionally on ANY read. The ATtiny85's
+     * bit-banged USI-TWI slave does not reliably capture the register byte of
+     * the nRF TWIM combined transaction (see the synth sketch), so gating on
+     * cur_addr==BURST_ADDR dropped real motion to {0,0} → ZMK zero_count stale
+     * clears → choppy cursor. Driven only ever reads 0x12, so unconditional is
+     * safe; keep the 0x03 debug branch first for the shell live reader.
+     * Exp43 destructive-read semantics preserved: serve once, then zero. */
+    if (cur_addr == DEBUG_ADDR && !(burst_x || burst_y)) {
         uint8_t buf[5] = { ps2.last_status, ps2.last_xraw, ps2.last_yraw,
                            (uint8_t)ps2.read_timeouts, (uint8_t)(ps2.read_timeouts >> 8) };
         Wire.write(buf, 5);
     } else {
-        Wire.write(0x00);
+        uint8_t buf[2] = { (uint8_t)burst_x, (uint8_t)burst_y };
+        burst_x = 0;
+        burst_y = 0;
+        Wire.write(buf, 2);
     }
+    last_busy_ms = millis();
 }
 
 void receiveEvent(int len) {
     if (len <= 0) {
         return;
     }
+    last_busy_ms = millis();
     cur_addr = Wire.read();
     uint8_t b1 = 0, b2 = 0;
     if (len > 1) b1 = Wire.read();
@@ -89,6 +93,21 @@ void setup() {
 void loop() {
     int8_t x, y;
     uint8_t buttons;
+
+    /* Exp62: USI idle self-heal. When the NiceNano enters deep sleep
+     * (CONFIG_ZMK_SLEEP) the TWIM shuts down mid USI byte-count, leaving this
+     * slave armed for clock edges that never arrive → on resume the master's
+     * polls get no ACK and the link stays dead until a NiceNano reset. Re-arm
+     * the USI slave when the bus has been silent >1s (safe: no live
+     * transaction is in flight). Wire.begin() clears the ISR callbacks, so
+     * re-register them. */
+    if (millis() - last_busy_ms > 1000) {
+        Wire.end();
+        Wire.begin(I2C_ADDR);
+        Wire.onRequest(requestEvent);
+        Wire.onReceive(receiveEvent);
+        last_busy_ms = millis();
+    }
 
     /* readPacket syncs itself to packet gaps — no fixed interval needed */
     if (ps2.readPacket(x, y, buttons)) {
