@@ -27,8 +27,8 @@ PS2Trackpoint ps2(PS2_CLK, PS2_DAT);
 PowerCurve curve;
 
 static volatile uint8_t cur_addr;
-static volatile int8_t  burst_x = 0;
-static volatile int8_t  burst_y = 0;
+static volatile int16_t acc_x = 0; /* Exp63: accumulated delta since last poll */
+static volatile int16_t acc_y = 0;
 static unsigned long last_good_ms = 0;
 static volatile unsigned long last_busy_ms = 0; /* Exp62: USI idle self-heal */
 
@@ -39,15 +39,22 @@ void requestEvent() {
      * cur_addr==BURST_ADDR dropped real motion to {0,0} → ZMK zero_count stale
      * clears → choppy cursor. Driven only ever reads 0x12, so unconditional is
      * safe; keep the 0x03 debug branch first for the shell live reader.
-     * Exp43 destructive-read semantics preserved: serve once, then zero. */
-    if (cur_addr == DEBUG_ADDR && !(burst_x || burst_y)) {
+     *
+     * Exp63 fix: ACCUMULATE instead of overwrite. Poll rate (10ms) and PS/2
+     * packet period (~8.7ms) are rate-mismatched — overwriting dropped a
+     * packet whenever two landed in one poll window (the first got clobbered
+     * before it was read). Serve the accumulated sum, clamped to int8, and
+     * subtract what was served so no remainder is lost (fast-flick > 127). */
+    if (cur_addr == DEBUG_ADDR && !(acc_x || acc_y)) {
         uint8_t buf[5] = { ps2.last_status, ps2.last_xraw, ps2.last_yraw,
                            (uint8_t)ps2.read_timeouts, (uint8_t)(ps2.read_timeouts >> 8) };
         Wire.write(buf, 5);
     } else {
-        uint8_t buf[2] = { (uint8_t)burst_x, (uint8_t)burst_y };
-        burst_x = 0;
-        burst_y = 0;
+        int8_t sx = (acc_x > 127) ? 127 : (acc_x < -128) ? -128 : (int8_t)acc_x;
+        int8_t sy = (acc_y > 127) ? 127 : (acc_y < -128) ? -128 : (int8_t)acc_y;
+        uint8_t buf[2] = { (uint8_t)sx, (uint8_t)sy };
+        acc_x -= sx;
+        acc_y -= sy;
         Wire.write(buf, 2);
     }
     last_busy_ms = millis();
@@ -113,16 +120,16 @@ void loop() {
     if (ps2.readPacket(x, y, buttons)) {
         int8_t cx, cy;
         curve.apply(x, y, cx, cy);
-        burst_x = cx;
-        burst_y = cy;
+        acc_x += cx;
+        acc_y += cy;
         last_good_ms = millis();
     }
 
     curve.update(); /* rebuild LUT if a param landed since the last loop (no-op otherwise) */
 
     /* stop feeding the driver stale motion after 100ms without a packet */
-    if ((burst_x || burst_y) && (millis() - last_good_ms > 100)) {
-        burst_x = 0;
-        burst_y = 0;
+    if ((acc_x || acc_y) && (millis() - last_good_ms > 100)) {
+        acc_x = 0;
+        acc_y = 0;
     }
 }
