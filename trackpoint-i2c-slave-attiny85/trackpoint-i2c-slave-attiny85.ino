@@ -32,6 +32,17 @@ static volatile int16_t acc_y = 0;
 static unsigned long last_good_ms = 0;
 static volatile unsigned long last_busy_ms = 0; /* Exp62: USI idle self-heal */
 
+/* Exp64: MOT (PB1) is an active-low data-ready level — LOW while motion is
+ * pending in the accumulator, HIGH when drained. The ZMK driver reads on the
+ * falling edge instead of a fixed 10ms poll. */
+static void set_mot(bool pending) {
+    if (pending) {
+        PORTB &= ~_BV(MOT_PIN);
+    } else {
+        PORTB |= _BV(MOT_PIN);
+    }
+}
+
 void requestEvent() {
     /* Exp62 fix: serve burst unconditionally on ANY read. The ATtiny85's
      * bit-banged USI-TWI slave does not reliably capture the register byte of
@@ -57,6 +68,7 @@ void requestEvent() {
         acc_y -= sy;
         Wire.write(buf, 2);
     }
+    set_mot(acc_x || acc_y); /* Exp64: MOT LOW while a remainder is still pending */
     last_busy_ms = millis();
 }
 
@@ -122,6 +134,7 @@ void loop() {
         curve.apply(x, y, cx, cy);
         acc_x += cx;
         acc_y += cy;
+        set_mot(acc_x || acc_y); /* Exp64: data pending */
         last_good_ms = millis();
     }
 
@@ -131,5 +144,6 @@ void loop() {
     if ((acc_x || acc_y) && (millis() - last_good_ms > 100)) {
         acc_x = 0;
         acc_y = 0;
+        set_mot(false); /* Exp64: drained */
     }
 }
